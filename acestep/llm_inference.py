@@ -325,7 +325,7 @@ class LLMHandler:
             checkpoint_dir: Checkpoint directory path
             lm_model_path: LM model path (relative to checkpoint_dir)
             backend: Backend type ("vllm" or "pt")
-            device: Device type ("auto", "cuda", or "cpu")
+            device: Device type ("auto", "cuda", "mps", "xpu", or "cpu")
             offload_to_cpu: Whether to offload to CPU
             dtype: Data type (if None, auto-detect based on device)
         
@@ -336,6 +336,8 @@ class LLMHandler:
             if device == "auto":
                 if torch.cuda.is_available():
                     device = "cuda"
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    device = "mps"
                 elif hasattr(torch, 'xpu') and torch.xpu.is_available():
                     device = "xpu"
                 else:
@@ -343,6 +345,9 @@ class LLMHandler:
 
             self.device = device
             self.offload_to_cpu = offload_to_cpu
+            if backend == "vllm" and device != "cuda":
+                logger.warning(f"[initialize] vllm backend requires CUDA. Falling back to PyTorch backend for device={device}.")
+                backend = "pt"
             # Set dtype based on device: bfloat16 for cuda, float32 for cpu
             if dtype is None:
                 self.dtype = torch.bfloat16 if device in ["cuda", "xpu"] else torch.float32
@@ -700,7 +705,7 @@ class LLMHandler:
                 )
             else:
                 # Generate without CFG using native generate() parameters
-                with torch.no_grad():
+                with torch.inference_mode():
                     outputs = self.llm.generate(
                         **inputs,
                         max_new_tokens=max_new_tokens,
@@ -735,7 +740,7 @@ class LLMHandler:
         generated_ids = generated_ids[input_length:]
         
         # Move to CPU for decoding
-        if generated_ids.is_cuda:
+        if generated_ids.device.type != "cpu":
             generated_ids = generated_ids.cpu()
         
         output_text = self.llm_tokenizer.decode(generated_ids, skip_special_tokens=False)
@@ -2058,7 +2063,7 @@ class LLMHandler:
         # Build logits processor for repetition penalty
         logits_processor = self._build_logits_processor(repetition_penalty)
         
-        with torch.no_grad():
+        with torch.inference_mode():
             for step in tqdm(range(max_new_tokens), desc="LLM Constrained Decoding", unit="token"):
                 # Forward pass
                 outputs = self._forward_pass(model, generated_ids, model_kwargs, past_key_values, use_cache)
@@ -2163,7 +2168,7 @@ class LLMHandler:
         # Build logits processor for non-CFG operations (repetition penalty, top_k, top_p)
         logits_processor = self._build_logits_processor(repetition_penalty)
         
-        with torch.no_grad():
+        with torch.inference_mode():
             for step in tqdm(range(max_new_tokens), desc="LLM CFG Generation", unit="token"):
                 # Forward pass for the entire batch (conditional + unconditional)
                 outputs = self._forward_pass(model, generated_ids, model_kwargs, past_key_values, use_cache)

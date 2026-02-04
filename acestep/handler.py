@@ -333,12 +333,12 @@ class AceStepHandler:
         """
         try:
             if device == "auto":
-                if hasattr(torch, 'xpu') and torch.xpu.is_available():
-                    device = "xpu"
-                elif torch.cuda.is_available():
+                if torch.cuda.is_available():
                     device = "cuda"
                 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                     device = "mps"
+                elif hasattr(torch, 'xpu') and torch.xpu.is_available():
+                    device = "xpu"
                 else:
                     device = "cpu"
 
@@ -930,7 +930,7 @@ class AceStepHandler:
             text_attention_mask = text_inputs.attention_mask.to(self.device).bool()
             
             # Encode
-            with torch.no_grad():
+            with torch.inference_mode():
                 text_outputs = self.text_encoder(text_input_ids)
                 if hasattr(text_outputs, 'last_hidden_state'):
                     text_hidden_states = text_outputs.last_hidden_state
@@ -1161,7 +1161,7 @@ class AceStepHandler:
         
         # Use tiled_encode for memory-efficient encoding
         # tiled_encode handles device transfer and dtype conversion internally
-        with torch.no_grad():
+        with torch.inference_mode():
             latents = self.tiled_encode(audio, offload_latent_to_cpu=True)
         
         # Move back to device and cast to model dtype
@@ -1343,7 +1343,7 @@ class AceStepHandler:
                 return "❌ Failed to process audio file"
             
             # Encode audio to latents using VAE
-            with torch.no_grad():
+            with torch.inference_mode():
                 with self._load_model_context("vae"):
                     # Check if audio is silence
                     if self.is_silence(processed_audio.unsqueeze(0)):
@@ -1641,7 +1641,7 @@ class AceStepHandler:
         parsed_metas = self._parse_metas(metas)
         
         # Encode target_wavs to get target_latents
-        with torch.no_grad():
+        with torch.inference_mode():
             target_latents_list = []
             latent_lengths = []
             # Use per-item wavs (may be adjusted if audio_code_hints are provided)
@@ -2037,7 +2037,7 @@ class AceStepHandler:
                 for refer_audio in refer_audios:
                     refer_audio = _normalize_audio_2d(refer_audio)
                     # Use tiled_encode for memory-efficient encoding of long audio
-                    with torch.no_grad():
+                    with torch.inference_mode():
                         refer_audio_latent = self.tiled_encode(refer_audio, offload_latent_to_cpu=True)
                     # Move to device and cast to model dtype
                     refer_audio_latent = refer_audio_latent.to(self.device).to(self.dtype)
@@ -2052,12 +2052,12 @@ class AceStepHandler:
         return refer_audio_latents, refer_audio_order_mask
 
     def infer_text_embeddings(self, text_token_idss):
-        with torch.no_grad():
+        with torch.inference_mode():
             text_embeddings = self.text_encoder(input_ids=text_token_idss, lyric_attention_mask=None).last_hidden_state
         return text_embeddings
 
     def infer_lyric_embeddings(self, lyric_token_ids):
-        with torch.no_grad():
+        with torch.inference_mode():
             lyric_embeddings = self.text_encoder.embed_tokens(lyric_token_ids)
         return lyric_embeddings
 
@@ -2136,7 +2136,7 @@ class AceStepHandler:
             non_cover_text_attention_masks,
         )
     
-    @torch.no_grad()
+    @torch.inference_mode()
     def service_generate(
         self,
         captions: Union[str, List[str]],
@@ -2562,7 +2562,7 @@ class AceStepHandler:
         # If short enough, encode directly
         if S <= chunk_size:
             vae_input = audio.to(self.device).to(self.vae.dtype)
-            with torch.no_grad():
+            with torch.inference_mode():
                 latents = self.vae.encode(vae_input).latent_dist.sample()
             if input_was_2d:
                 latents = latents.squeeze(0)
@@ -2603,7 +2603,7 @@ class AceStepHandler:
             audio_chunk = audio[:, :, win_start:win_end].to(self.device).to(self.vae.dtype)
             
             # Encode
-            with torch.no_grad():
+            with torch.inference_mode():
                 latent_chunk = self.vae.encode(audio_chunk).latent_dist.sample()
             
             # Determine downsample factor from the first chunk
@@ -2639,7 +2639,7 @@ class AceStepHandler:
         first_win_end = min(S, first_core_end + overlap)
         
         first_audio_chunk = audio[:, :, first_win_start:first_win_end].to(self.device).to(self.vae.dtype)
-        with torch.no_grad():
+        with torch.inference_mode():
             first_latent_chunk = self.vae.encode(first_audio_chunk).latent_dist.sample()
         
         downsample_factor = first_audio_chunk.shape[-1] / first_latent_chunk.shape[-1]
@@ -2677,7 +2677,7 @@ class AceStepHandler:
             audio_chunk = audio[:, :, win_start:win_end].to(self.device).to(self.vae.dtype)
             
             # Encode on GPU
-            with torch.no_grad():
+            with torch.inference_mode():
                 latent_chunk = self.vae.encode(audio_chunk).latent_dist.sample()
             
             # Calculate trim amounts in latent frames
@@ -2900,7 +2900,7 @@ class AceStepHandler:
             
             # Decode latents to audio
             start_time = time.time()
-            with torch.no_grad():
+            with torch.inference_mode():
                 with self._load_model_context("vae"):
                     # Move pred_latents to CPU early to save VRAM (will be used in extra_outputs later)
                     pred_latents_cpu = pred_latents.detach().cpu()
@@ -3016,7 +3016,7 @@ class AceStepHandler:
                 "error": str(e),
             }
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def get_lyric_timestamp(
         self,
         pred_latent: torch.Tensor,
@@ -3233,7 +3233,7 @@ class AceStepHandler:
                 "error": error_msg
             }
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def get_lyric_score(
             self,
             pred_latent: torch.Tensor,

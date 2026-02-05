@@ -1543,6 +1543,16 @@ def create_app() -> FastAPI:
                 # Update local cache
                 _update_local_cache(job_id, None, "failed")
             finally:
+                # Best-effort cache cleanup to reduce MPS memory fragmentation between jobs
+                try:
+                    if hasattr(h, "_empty_cache"):
+                        h._empty_cache()
+                    else:
+                        import torch
+                        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                            torch.mps.empty_cache()
+                except Exception:
+                    pass
                 dt = max(0.0, time.time() - t0)
                 async with app.state.stats_lock:
                     app.state.recent_durations.append(dt)

@@ -400,8 +400,6 @@ class LLMHandler:
                     device = "mps"
                 elif hasattr(torch, 'xpu') and torch.xpu.is_available():
                     device = "xpu"
-                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                    device = "mps"
                 else:
                     device = "cpu"
             elif device == "cuda" and not torch.cuda.is_available():

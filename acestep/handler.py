@@ -413,10 +413,12 @@ class AceStepHandler:
             self.offload_to_cpu = offload_to_cpu
             self.offload_dit_to_cpu = offload_dit_to_cpu
             self.compiled = compile_model
-            # Set dtype based on device: bfloat16 for cuda/xpu/mps, float32 for cpu
-            # Models are trained in bfloat16; MPS supports bfloat16 natively since PyTorch 2.3+
-            if device in ["cuda", "xpu", "mps"]:
+            # Set dtype based on device: bf16 for CUDA/XPU, fp16 for MPS, fp32 for CPU
+            # MPS fp16 is generally faster and more stable than bf16 on Apple Silicon.
+            if device in ["cuda", "xpu"]:
                 self.dtype = torch.bfloat16
+            elif device == "mps":
+                self.dtype = torch.float16
             else:
                 self.dtype = torch.float32
             self.quantization = quantization
@@ -466,10 +468,10 @@ class AceStepHandler:
                 try:
                     logger.info(f"[initialize_service] Attempting to load model with attention implementation: {attn_implementation}")
                     self.model = AutoModel.from_pretrained(
-                        acestep_v15_checkpoint_path, 
-                        trust_remote_code=True, 
+                        acestep_v15_checkpoint_path,
+                        trust_remote_code=True,
                         attn_implementation=attn_implementation,
-                        dtype="bfloat16"
+                        dtype=self.dtype,
                     )
                 except Exception as e:
                     logger.warning(f"[initialize_service] Failed to load model with {attn_implementation}: {e}")
@@ -1324,7 +1326,11 @@ class AceStepHandler:
                 return torch.mps.recommended_max_memory() / (1024 ** 3)
             except Exception:
                 pass
-        return self._get_system_memory_gb()
+        system_gb = self._get_system_memory_gb()
+        if system_gb is None:
+            return None
+        # Align with gpu_config: MPS can use ~75% of unified memory for GPU workloads.
+        return system_gb * 0.75
 
     def _get_auto_decode_chunk_size(self) -> int:
         """Choose a conservative VAE decode chunk size based on memory."""
@@ -1401,8 +1407,10 @@ class AceStepHandler:
     def _get_vae_dtype(self, device: Optional[str] = None) -> torch.dtype:
         """Get VAE dtype based on target device and GPU tier."""
         target_device = device or self.device
-        if target_device in ["cuda", "xpu", "mps"]:
+        if target_device in ["cuda", "xpu"]:
             return torch.bfloat16
+        if target_device == "mps":
+            return torch.float16
         if target_device == "cpu":
             # On low-VRAM tiers (<=8GB), avoid CPU bfloat16 VAE path.
             # This path is often extremely slow and can destabilize preprocessing.
@@ -2011,7 +2019,7 @@ class AceStepHandler:
         for ii, refer_audio_list in enumerate(refer_audios):
             if isinstance(refer_audio_list, list):
                 for idx, refer_audio in enumerate(refer_audio_list):
-                    refer_audio_list[idx] = refer_audio_list[idx].to(self.device).to(torch.bfloat16)
+                    refer_audio_list[idx] = refer_audio_list[idx].to(self.device).to(self._get_vae_dtype())
             elif isinstance(refer_audio_list, torch.Tensor):
                 refer_audios[ii] = refer_audios[ii].to(self.device)
         

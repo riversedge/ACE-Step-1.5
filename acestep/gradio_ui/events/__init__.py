@@ -1344,3 +1344,13 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
         ],
         outputs=[training_section["export_status"]]
     )
+
+    # Export LoKr
+    training_section["export_lokr_btn"].click(
+        fn=train_h.export_lokr,
+        inputs=[
+            training_section["lokr_export_path"],
+            training_section["lokr_output_dir"],
+        ],
+        outputs=[training_section["lokr_export_status"]],
+    )

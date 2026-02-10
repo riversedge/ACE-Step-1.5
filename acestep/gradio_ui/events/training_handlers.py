@@ -1028,3 +1028,56 @@ def export_lora(
     except Exception as e:
         logger.exception("Export error")
         return f"� Export failed: {str(e)}"
+
+
+def export_lokr(
+    export_path: str,
+    lokr_output_dir: str,
+) -> str:
+    """Export trained LoKr weights.
+
+    Returns:
+        Status message
+    """
+    if not export_path or not export_path.strip():
+        return "❌ Please enter an export path"
+
+    final_dir = os.path.join(lokr_output_dir, "final")
+    checkpoint_dir = os.path.join(lokr_output_dir, "checkpoints")
+
+    source_file = ""
+    if os.path.exists(os.path.join(final_dir, "lokr_weights.safetensors")):
+        source_file = os.path.join(final_dir, "lokr_weights.safetensors")
+    elif os.path.exists(checkpoint_dir):
+        checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith("epoch_")]
+        if not checkpoints:
+            return "❌ No checkpoints found"
+        checkpoints.sort(key=lambda x: int(x.split("_")[1]))
+        latest = checkpoints[-1]
+        candidate = os.path.join(checkpoint_dir, latest, "lokr_weights.safetensors")
+        if not os.path.exists(candidate):
+            return f"❌ No LoKr weights found in latest checkpoint: {latest}"
+        source_file = candidate
+    else:
+        return f"❌ No trained LoKr weights found in {lokr_output_dir}"
+
+    try:
+        import shutil
+
+        export_path = export_path.strip()
+        if export_path.lower().endswith(".safetensors"):
+            os.makedirs(os.path.dirname(export_path) if os.path.dirname(export_path) else ".", exist_ok=True)
+            shutil.copy2(source_file, export_path)
+            return f"✅ LoKr exported to {export_path}"
+
+        if os.path.exists(export_path) and not os.path.isdir(export_path):
+            return f"❌ Export path exists and is not a directory: {export_path}"
+
+        os.makedirs(export_path, exist_ok=True)
+        dst_file = os.path.join(export_path, "lokr_weights.safetensors")
+        shutil.copy2(source_file, dst_file)
+        return f"✅ LoKr exported to {dst_file}"
+
+    except Exception as e:
+        logger.exception("LoKr export error")
+        return f"❌ Export failed: {str(e)}"

@@ -696,6 +696,21 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                         y_title=t("training.loss"),
                         scale=1,
                     )
+
+                gr.HTML("<hr><h3>📦 Export LoKr</h3>")
+
+                with gr.Row():
+                    lokr_export_path = gr.Textbox(
+                        label="Export Path",
+                        value="./lokr_output/final_lokr",
+                        placeholder="./lokr_output/my_lokr",
+                    )
+                    export_lokr_btn = gr.Button("📦 Export LoKr", variant="secondary")
+
+                lokr_export_status = gr.Textbox(
+                    label="Export Status",
+                    interactive=False,
+                )
     
     # Store dataset builder state
     dataset_builder_state = gr.State(None)
@@ -797,5 +812,8 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
         "lokr_training_progress": lokr_training_progress,
         "lokr_training_log": lokr_training_log,
         "lokr_training_loss_plot": lokr_training_loss_plot,
+        "lokr_export_path": lokr_export_path,
+        "export_lokr_btn": export_lokr_btn,
+        "lokr_export_status": lokr_export_status,
         "training_state": training_state,
     }

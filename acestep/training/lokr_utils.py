@@ -101,8 +101,8 @@ def inject_lokr_into_dit(
     lycoris_net.apply_to()
 
     # Keep a reference on decoder so it stays discoverable after wrappers.
-    if not hasattr(decoder, "_lycoris_net"):
-        decoder._lycoris_net = lycoris_net
+    # Always refresh this reference to avoid stale nets from earlier runs.
+    decoder._lycoris_net = lycoris_net
 
     lokr_param_list = []
     for module in getattr(lycoris_net, "loras", []) or []:

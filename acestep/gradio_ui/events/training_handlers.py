@@ -1031,9 +1031,41 @@ def export_lora(
         return f"� Export failed: {str(e)}"
 
 
+def list_lokr_export_epochs(lokr_output_dir: str) -> Tuple[Any, str]:
+    """List available LoKr checkpoint epochs for export dropdown."""
+    default_choice = "Latest (auto)"
+    if not lokr_output_dir or not lokr_output_dir.strip():
+        return gr.update(choices=[default_choice], value=default_choice), "⚠️ Enter LoKr output directory first"
+
+    checkpoint_dir = os.path.join(lokr_output_dir.strip(), "checkpoints")
+    if not os.path.isdir(checkpoint_dir):
+        return gr.update(choices=[default_choice], value=default_choice), "ℹ️ No checkpoints found; export will use latest available weights"
+
+    checkpoints = []
+    for d in os.listdir(checkpoint_dir):
+        if not d.startswith("epoch_"):
+            continue
+        weight_file = os.path.join(checkpoint_dir, d, "lokr_weights.safetensors")
+        if not os.path.exists(weight_file):
+            continue
+        try:
+            epoch_num = int(d.split("_")[1])
+        except Exception:
+            continue
+        checkpoints.append((epoch_num, d))
+
+    if not checkpoints:
+        return gr.update(choices=[default_choice], value=default_choice), "ℹ️ No exportable epoch checkpoints found"
+
+    checkpoints.sort(key=lambda x: x[0], reverse=True)
+    choices = [default_choice] + [d for _, d in checkpoints]
+    return gr.update(choices=choices, value=default_choice), f"✅ Found {len(checkpoints)} LoKr checkpoints"
+
+
 def export_lokr(
     export_path: str,
     lokr_output_dir: str,
+    selected_epoch: Optional[str] = None,
 ) -> str:
     """Export trained LoKr weights.
 
@@ -1045,31 +1077,62 @@ def export_lokr(
 
     final_dir = os.path.join(lokr_output_dir, "final")
     checkpoint_dir = os.path.join(lokr_output_dir, "checkpoints")
+    default_epoch_choice = "Latest (auto)"
+
+    chosen_epoch = (selected_epoch or "").strip()
+    if not chosen_epoch:
+        chosen_epoch = default_epoch_choice
+
+    checkpoint_names: List[str] = []
+    if os.path.isdir(checkpoint_dir):
+        for d in os.listdir(checkpoint_dir):
+            if not d.startswith("epoch_"):
+                continue
+            try:
+                int(d.split("_")[1])
+            except Exception:
+                continue
+            checkpoint_names.append(d)
+        checkpoint_names.sort(key=lambda x: int(x.split("_")[1]))
 
     source_file = ""
     source_origin = "final"
-    latest_checkpoint = None
+    latest_checkpoint = checkpoint_names[-1] if checkpoint_names else None
     latest_epoch = None
     training_state_path = None
-    if os.path.exists(os.path.join(final_dir, "lokr_weights.safetensors")):
-        source_file = os.path.join(final_dir, "lokr_weights.safetensors")
-    elif os.path.exists(checkpoint_dir):
-        checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith("epoch_")]
-        if not checkpoints:
-            return "❌ No checkpoints found"
-        checkpoints.sort(key=lambda x: int(x.split("_")[1]))
-        latest = checkpoints[-1]
-        latest_checkpoint = latest
-        source_origin = f"checkpoints/{latest}"
+
+    explicit_epoch = chosen_epoch not in {default_epoch_choice, "latest", "Latest", "auto", "Auto"}
+    if explicit_epoch:
+        requested = chosen_epoch
+        if requested.isdigit():
+            requested = f"epoch_{requested}"
+        if requested not in checkpoint_names:
+            return (
+                f"❌ Selected epoch not found: {chosen_epoch}. "
+                f"Available: {', '.join(checkpoint_names) if checkpoint_names else '(none)'}"
+            )
+        source_origin = f"checkpoints/{requested}"
+        latest_checkpoint = requested
         try:
-            latest_epoch = int(latest.split("_")[1])
+            latest_epoch = int(requested.split("_")[1])
         except Exception:
             latest_epoch = None
-        candidate = os.path.join(checkpoint_dir, latest, "lokr_weights.safetensors")
-        training_state_path = os.path.join(checkpoint_dir, latest, "training_state.pt")
-        if not os.path.exists(candidate):
-            return f"❌ No LoKr weights found in latest checkpoint: {latest}"
-        source_file = candidate
+        source_file = os.path.join(checkpoint_dir, requested, "lokr_weights.safetensors")
+        training_state_path = os.path.join(checkpoint_dir, requested, "training_state.pt")
+        if not os.path.exists(source_file):
+            return f"❌ No LoKr weights found for selected epoch: {requested}"
+    elif os.path.exists(os.path.join(final_dir, "lokr_weights.safetensors")):
+        source_file = os.path.join(final_dir, "lokr_weights.safetensors")
+    elif latest_checkpoint:
+        source_origin = f"checkpoints/{latest_checkpoint}"
+        try:
+            latest_epoch = int(latest_checkpoint.split("_")[1])
+        except Exception:
+            latest_epoch = None
+        source_file = os.path.join(checkpoint_dir, latest_checkpoint, "lokr_weights.safetensors")
+        training_state_path = os.path.join(checkpoint_dir, latest_checkpoint, "training_state.pt")
+        if not os.path.exists(source_file):
+            return f"❌ No LoKr weights found in latest checkpoint: {latest_checkpoint}"
     else:
         return f"❌ No trained LoKr weights found in {lokr_output_dir}"
 
@@ -1077,18 +1140,14 @@ def export_lokr(
         import shutil
         import torch
 
-        # Even when exporting from final/, try to enrich metadata from the latest
-        # checkpoint training_state (epoch/step/run metadata), if available.
-        if latest_checkpoint is None and os.path.exists(checkpoint_dir):
-            checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith("epoch_")]
-            if checkpoints:
-                checkpoints.sort(key=lambda x: int(x.split("_")[1]))
-                latest_checkpoint = checkpoints[-1]
-                try:
-                    latest_epoch = int(latest_checkpoint.split("_")[1])
-                except Exception:
-                    latest_epoch = latest_epoch
-                training_state_path = os.path.join(checkpoint_dir, latest_checkpoint, "training_state.pt")
+        # When exporting from final/, enrich metadata from latest checkpoint
+        # training_state (epoch/step/run metadata), if available.
+        if training_state_path is None and latest_checkpoint:
+            try:
+                latest_epoch = int(latest_checkpoint.split("_")[1])
+            except Exception:
+                pass
+            training_state_path = os.path.join(checkpoint_dir, latest_checkpoint, "training_state.pt")
 
         safetensors_meta: Dict[str, Any] = {}
         lokr_config = None

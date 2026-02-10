@@ -122,6 +122,32 @@ def _ensure_optimizer_params_fp32(optimizer: torch.optim.Optimizer) -> Tuple[int
     return casted, total
 
 
+def _collect_lokr_trainable_params(module: nn.Module, lycoris_net: Optional[nn.Module]) -> List[torch.nn.Parameter]:
+    """
+    Collect LoKr trainable params robustly.
+
+    Primary path is model parameter traversal. If that returns empty due to
+    wrapper/registration quirks, fall back to LyCORIS module parameters.
+    """
+    params = [p for p in module.parameters() if p.requires_grad]
+    if params:
+        return list({id(p): p for p in params}.values())
+
+    fallback: List[torch.nn.Parameter] = []
+    if lycoris_net is None:
+        return fallback
+
+    for m in getattr(lycoris_net, "loras", []) or []:
+        for p in m.parameters():
+            if p.requires_grad:
+                fallback.append(p)
+    if not fallback:
+        for p in lycoris_net.parameters():
+            if p.requires_grad:
+                fallback.append(p)
+    return list({id(p): p for p in fallback}.values())
+
+
 def _iter_module_wrappers(module: nn.Module) -> List[nn.Module]:
     """Collect wrapper chain modules (Fabric/PEFT/compile/base-model wrappers)."""
     modules: List[nn.Module] = []
@@ -1147,16 +1173,28 @@ class LoKRTrainer:
         else:
             self.module.model.decoder = self.module.model.decoder.to(dtype=self.module.dtype)
         casted_trainable, total_trainable_tensors = _ensure_trainable_params_fp32(self.module.model.decoder)
+        if total_trainable_tensors == 0 and getattr(self.module, "lycoris_net", None) is not None:
+            casted_fallback, total_fallback = _ensure_trainable_params_fp32(self.module.lycoris_net)
+            casted_trainable += casted_fallback
+            total_trainable_tensors += total_fallback
         logger.info(
             f"Trainable tensor dtype fixup: casted {casted_trainable}/{total_trainable_tensors} to fp32"
         )
 
         train_loader = data_module.train_dataloader()
-        trainable_params = [p for p in self.module.model.parameters() if p.requires_grad]
+        trainable_params = _collect_lokr_trainable_params(
+            self.module.model,
+            getattr(self.module, "lycoris_net", None),
+        )
 
         if not trainable_params:
             yield 0, 0.0, "❌ No trainable parameters found!"
             return
+        if total_trainable_tensors == 0:
+            logger.warning(
+                "LoKr trainable params discovered via LyCORIS fallback traversal; "
+                "decoder parameter traversal returned 0 trainables."
+            )
 
         yield 0, 0.0, f"🎯 Training {sum(p.numel() for p in trainable_params):,} parameters"
 
@@ -1338,7 +1376,10 @@ class LoKRTrainer:
         os.makedirs(self.training_config.output_dir, exist_ok=True)
 
         train_loader = data_module.train_dataloader()
-        trainable_params = [p for p in self.module.model.parameters() if p.requires_grad]
+        trainable_params = _collect_lokr_trainable_params(
+            self.module.model,
+            getattr(self.module, "lycoris_net", None),
+        )
         if not trainable_params:
             yield 0, 0.0, "❌ No trainable parameters found!"
             return

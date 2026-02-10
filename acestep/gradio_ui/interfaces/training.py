@@ -598,7 +598,7 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                 with gr.Row():
                     lokr_learning_rate = gr.Number(
                         label="Learning Rate",
-                        value=3e-3,
+                        value=1e-3,
                         info="LoKr commonly uses a higher LR than LoRA. Tune per dataset.",
                     )
 
@@ -606,7 +606,7 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                         minimum=1,
                         maximum=4000,
                         step=1,
-                        value=50,
+                        value=500,
                         label="Max Epochs",
                     )
 
@@ -622,7 +622,7 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                         minimum=1,
                         maximum=16,
                         step=1,
-                        value=1,
+                        value=4,
                         label="Gradient Accumulation",
                     )
 
@@ -631,7 +631,7 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                         minimum=50,
                         maximum=1000,
                         step=50,
-                        value=200,
+                        value=50,
                         label="Save Every N Epochs",
                     )
 
@@ -706,6 +706,15 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                         placeholder="./lokr_output/my_lokr",
                     )
                     export_lokr_btn = gr.Button("📦 Export LoKr", variant="secondary")
+
+                with gr.Row():
+                    lokr_export_epoch = gr.Dropdown(
+                        choices=["Latest (auto)"],
+                        value="Latest (auto)",
+                        label="Checkpoint Epoch",
+                        info="Select a specific epoch checkpoint to export, or keep Latest (auto).",
+                    )
+                    refresh_lokr_export_epochs_btn = gr.Button("↻ Refresh Epochs", variant="secondary")
 
                 lokr_export_status = gr.Textbox(
                     label="Export Status",
@@ -813,6 +822,8 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
         "lokr_training_log": lokr_training_log,
         "lokr_training_loss_plot": lokr_training_loss_plot,
         "lokr_export_path": lokr_export_path,
+        "lokr_export_epoch": lokr_export_epoch,
+        "refresh_lokr_export_epochs_btn": refresh_lokr_export_epochs_btn,
         "export_lokr_btn": export_lokr_btn,
         "lokr_export_status": lokr_export_status,
         "training_state": training_state,

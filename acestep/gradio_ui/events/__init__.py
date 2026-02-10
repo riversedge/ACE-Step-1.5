@@ -1345,12 +1345,31 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
         outputs=[training_section["export_status"]]
     )
 
+    # Refresh LoKr export epoch dropdown
+    training_section["refresh_lokr_export_epochs_btn"].click(
+        fn=train_h.list_lokr_export_epochs,
+        inputs=[training_section["lokr_output_dir"]],
+        outputs=[
+            training_section["lokr_export_epoch"],
+            training_section["lokr_export_status"],
+        ],
+    )
+    training_section["lokr_output_dir"].change(
+        fn=train_h.list_lokr_export_epochs,
+        inputs=[training_section["lokr_output_dir"]],
+        outputs=[
+            training_section["lokr_export_epoch"],
+            training_section["lokr_export_status"],
+        ],
+    )
+
     # Export LoKr
     training_section["export_lokr_btn"].click(
         fn=train_h.export_lokr,
         inputs=[
             training_section["lokr_export_path"],
             training_section["lokr_output_dir"],
+            training_section["lokr_export_epoch"],
         ],
         outputs=[training_section["lokr_export_status"]],
     )

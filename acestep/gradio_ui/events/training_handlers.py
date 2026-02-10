@@ -592,6 +592,7 @@ def start_training(
     
     training_state["is_training"] = True
     training_state["should_stop"] = False
+    training_state["adapter_type"] = "lora"
     
     try:
         from acestep.training.trainer import LoRATrainer
@@ -633,11 +634,12 @@ def start_training(
             pin_memory_device = None
             mixed_precision = "fp16"
         else:
-            cpu_count = os.cpu_count() or 2
-            num_workers = min(4, max(1, cpu_count // 2))
+            # Keep CPU path single-process for reliability across constrained
+            # runtimes (sandboxed/limited shared-memory environments).
+            num_workers = 0
             pin_memory = False
             prefetch_factor = 2
-            persistent_workers = num_workers > 0
+            persistent_workers = False
             pin_memory_device = None
             mixed_precision = "fp32"
 
@@ -672,7 +674,7 @@ def start_training(
         # Start timer
         start_time = time.time()
         
-        yield f"� Starting training from {tensor_dir}...", "", loss_data, training_state
+        yield f"🚀 Starting LoRA training from {tensor_dir}...", "", loss_data, training_state
         
         # Create trainer
         trainer = LoRATrainer(
@@ -749,7 +751,7 @@ def start_training(
             log_lines.append(failure_message)
             yield final_msg, "\n".join(log_lines[-15:]), loss_data, training_state
             return
-        completion_msg = f"� Training completed! Total time: {_format_duration(total_time)}"
+        completion_msg = f"✅ LoRA training completed! Total time: {_format_duration(total_time)}"
         
         logger.info(completion_msg)
         log_lines.append(completion_msg)
@@ -775,6 +777,208 @@ def stop_training(training_state: Dict) -> Tuple[str, Dict]:
     
     training_state["should_stop"] = True
     return "⏹️ Stopping training...", training_state
+
+
+def start_lokr_training(
+    tensor_dir: str,
+    dit_handler,
+    lokr_linear_dim: int,
+    lokr_linear_alpha: int,
+    lokr_factor: int,
+    lokr_decompose_both: bool,
+    lokr_use_tucker: bool,
+    lokr_use_scalar: bool,
+    lokr_weight_decompose: bool,
+    learning_rate: float,
+    train_epochs: int,
+    train_batch_size: int,
+    gradient_accumulation: int,
+    save_every_n_epochs: int,
+    training_shift: float,
+    training_seed: int,
+    lokr_output_dir: str,
+    training_state: Dict,
+    progress=None,
+):
+    """Start LoKr training from preprocessed tensors."""
+    if not tensor_dir or not tensor_dir.strip():
+        yield "❌ Please enter a tensor directory path", "", None, training_state
+        return
+
+    tensor_dir = tensor_dir.strip()
+    if not os.path.exists(tensor_dir):
+        yield f"❌ Tensor directory not found: {tensor_dir}", "", None, training_state
+        return
+
+    if dit_handler is None or dit_handler.model is None:
+        yield "❌ Model not initialized. Please initialize the service first.", "", None, training_state
+        return
+
+    if getattr(dit_handler, "quantization", None) is not None:
+        yield "Switching model to training preset (disable quantization)...", "", None, training_state
+        if hasattr(dit_handler, "switch_to_training_preset"):
+            switch_status, switched = dit_handler.switch_to_training_preset()
+            if not switched:
+                yield f"❌ {switch_status}", "", None, training_state
+                return
+            yield f"✅ {switch_status}", "", None, training_state
+        else:
+            yield "❌ Training requires non-quantized DiT, and auto-switch is unavailable in this build.", "", None, training_state
+            return
+
+    try:
+        from lightning.fabric import Fabric  # noqa: F401
+    except ImportError as e:
+        yield f"❌ Missing required packages: {e}\nPlease install: pip install lightning lycoris-lora", "", None, training_state
+        return
+
+    training_state["is_training"] = True
+    training_state["should_stop"] = False
+    training_state["adapter_type"] = "lokr"
+
+    try:
+        from acestep.training.configs import LoKRConfig as LoKRConfigClass, TrainingConfig
+        from acestep.training.trainer import LoKRTrainer
+
+        device_attr = getattr(dit_handler, "device", "")
+        if hasattr(device_attr, "type"):
+            device_type = str(device_attr.type).lower()
+        else:
+            device_type = str(device_attr).split(":", 1)[0].lower()
+
+        if device_type == "cuda":
+            num_workers = 4
+            pin_memory = True
+            prefetch_factor = 2
+            persistent_workers = True
+            pin_memory_device = "cuda"
+            mixed_precision = "bf16"
+        elif device_type == "xpu":
+            num_workers = 4
+            pin_memory = True
+            prefetch_factor = 2
+            persistent_workers = True
+            pin_memory_device = None
+            mixed_precision = "bf16"
+        elif device_type == "mps":
+            num_workers = 0
+            pin_memory = False
+            prefetch_factor = 2
+            persistent_workers = False
+            pin_memory_device = None
+            mixed_precision = "fp16"
+        else:
+            # Keep CPU path single-process for reliability across constrained
+            # runtimes (sandboxed/limited shared-memory environments).
+            num_workers = 0
+            pin_memory = False
+            prefetch_factor = 2
+            persistent_workers = False
+            pin_memory_device = None
+            mixed_precision = "fp32"
+
+        lokr_config = LoKRConfigClass(
+            linear_dim=lokr_linear_dim,
+            linear_alpha=lokr_linear_alpha,
+            factor=lokr_factor,
+            decompose_both=lokr_decompose_both,
+            use_tucker=lokr_use_tucker,
+            use_scalar=lokr_use_scalar,
+            weight_decompose=lokr_weight_decompose,
+        )
+        training_config = TrainingConfig(
+            shift=training_shift,
+            learning_rate=learning_rate,
+            batch_size=train_batch_size,
+            gradient_accumulation_steps=gradient_accumulation,
+            max_epochs=train_epochs,
+            save_every_n_epochs=save_every_n_epochs,
+            seed=training_seed,
+            output_dir=lokr_output_dir,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            pin_memory_device=pin_memory_device,
+            mixed_precision=mixed_precision,
+        )
+
+        import pandas as pd
+
+        log_lines = []
+        loss_data = pd.DataFrame({"step": [0], "loss": [0.0]})
+        start_time = time.time()
+        yield f"🚀 Starting LoKr training from {tensor_dir}...", "", loss_data, training_state
+
+        trainer = LoKRTrainer(
+            dit_handler=dit_handler,
+            lokr_config=lokr_config,
+            training_config=training_config,
+        )
+
+        step_list = []
+        loss_list = []
+        training_failed = False
+        failure_message = ""
+
+        for step, loss, status in trainer.train_from_preprocessed(tensor_dir, training_state):
+            status_text = str(status)
+            status_lower = status_text.lower()
+            if (
+                status_text.startswith("❌")
+                or "training failed" in status_lower
+                or "error:" in status_lower
+                or "module not found" in status_lower
+            ):
+                training_failed = True
+                failure_message = status_text
+
+            elapsed_seconds = time.time() - start_time
+            time_info = f"⏱️ Elapsed: {_format_duration(elapsed_seconds)}"
+            match = re.search(r"Epoch\s+(\d+)/(\d+)", status_text)
+            if match:
+                current_ep = int(match.group(1))
+                total_ep = int(match.group(2))
+                if current_ep > 0:
+                    eta_seconds = (elapsed_seconds / current_ep) * (total_ep - current_ep)
+                    time_info += f" | ETA: ~{_format_duration(eta_seconds)}"
+
+            display_status = f"{status_text}\n{time_info}"
+            log_lines.append(status_text)
+            if len(log_lines) > 15:
+                log_lines = log_lines[-15:]
+            log_text = "\n".join(log_lines)
+
+            if step > 0 and loss is not None and loss == loss:
+                step_list.append(step)
+                loss_list.append(float(loss))
+                loss_data = pd.DataFrame({"step": step_list, "loss": loss_list})
+
+            yield display_status, log_text, loss_data, training_state
+
+            if training_state.get("should_stop", False):
+                log_lines.append("⏹️ Training stopped by user")
+                yield f"⏹️ Stopped ({time_info})", "\n".join(log_lines[-15:]), loss_data, training_state
+                break
+
+        total_time = time.time() - start_time
+        training_state["is_training"] = False
+        if training_failed:
+            final_msg = f"{failure_message}\nElapsed: {_format_duration(total_time)}"
+            log_lines.append(failure_message)
+            yield final_msg, "\n".join(log_lines[-15:]), loss_data, training_state
+            return
+
+        completion_msg = f"✅ LoKr training completed! Total time: {_format_duration(total_time)}"
+        log_lines.append(completion_msg)
+        yield completion_msg, "\n".join(log_lines[-15:]), loss_data, training_state
+
+    except Exception as e:
+        logger.exception("LoKr training error")
+        training_state["is_training"] = False
+        import pandas as pd
+        empty_df = pd.DataFrame({"step": [], "loss": []})
+        yield f"❌ Error: {str(e)}", str(e), empty_df, training_state
 
 
 def export_lora(
@@ -824,6 +1028,3 @@ def export_lora(
     except Exception as e:
         logger.exception("Export error")
         return f"� Export failed: {str(e)}"
-
-
-

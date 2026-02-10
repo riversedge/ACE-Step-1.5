@@ -108,6 +108,8 @@ class AceStepHandler:
         self.use_lora = False
         self.lora_scale = 1.0  # LoRA influence scale (0-1)
         self._base_decoder = None  # Backup of original decoder
+        self._adapter_type = None  # None | "peft_lora" | "lycoris_lokr"
+        self._lycoris_net = None
     
     def get_available_checkpoints(self) -> str:
         """Return project root directory path"""
@@ -161,7 +163,7 @@ class AceStepHandler:
         return getattr(self.config, 'is_turbo', False)
     
     def load_lora(self, lora_path: str) -> str:
-        """Load LoRA adapter into the decoder.
+        """Load LoRA or LoKr adapter into the decoder.
         
         Args:
             lora_path: Path to the LoRA adapter directory (containing adapter_config.json)
@@ -190,43 +192,110 @@ class AceStepHandler:
         if not os.path.exists(lora_path):
             return f"❌ LoRA path not found: {lora_path}"
         
-        # Check if it's a valid PEFT adapter directory
-        config_file = os.path.join(lora_path, "adapter_config.json")
-        if not os.path.exists(config_file):
-            return f"❌ Invalid LoRA adapter: adapter_config.json not found in {lora_path}"
-        
-        try:
-            from peft import PeftModel, PeftConfig
-        except ImportError:
-            return "❌ PEFT library not installed. Please install with: pip install peft"
-        
+        is_peft_adapter_dir = False
+        if os.path.isdir(lora_path):
+            config_file = os.path.join(lora_path, "adapter_config.json")
+            is_peft_adapter_dir = os.path.exists(config_file)
+
+        lokr_weights_path = None
+        if os.path.isdir(lora_path):
+            candidate = os.path.join(lora_path, "lokr_weights.safetensors")
+            if os.path.exists(candidate):
+                lokr_weights_path = candidate
+        elif lora_path.endswith(".safetensors"):
+            lokr_weights_path = lora_path
+
         try:
             import copy
-            # Backup base decoder if not already backed up
-            if self._base_decoder is None:
-                self._base_decoder = copy.deepcopy(self.model.decoder)
-                logger.info("Base decoder backed up")
-            else:
-                # Restore base decoder before loading new LoRA
+
+            if self.lora_loaded and self._base_decoder is not None:
                 self.model.decoder = copy.deepcopy(self._base_decoder)
-                logger.info("Restored base decoder before loading new LoRA")
-            
-            # Load PEFT adapter
-            logger.info(f"Loading LoRA adapter from {lora_path}")
-            self.model.decoder = PeftModel.from_pretrained(
-                self.model.decoder,
-                lora_path,
-                is_trainable=False,
+                logger.info("Restored base decoder before loading new adapter")
+
+            # Always backup current clean decoder before loading an adapter.
+            self._base_decoder = copy.deepcopy(self.model.decoder)
+            logger.info("Base decoder backed up")
+
+            if is_peft_adapter_dir:
+                try:
+                    from peft import PeftModel
+                except ImportError:
+                    return "❌ PEFT library not installed. Please install with: pip install peft"
+
+                logger.info(f"Loading LoRA adapter from {lora_path}")
+                self.model.decoder = PeftModel.from_pretrained(
+                    self.model.decoder,
+                    lora_path,
+                    is_trainable=False,
+                )
+                self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+                self.model.decoder.eval()
+
+                self._adapter_type = "peft_lora"
+                self._lycoris_net = None
+                self.lora_loaded = True
+                self.use_lora = True
+                self.lora_scale = 1.0
+                logger.info(f"LoRA adapter loaded successfully from {lora_path}")
+                return f"✅ LoRA loaded from {lora_path}"
+
+            if lokr_weights_path is not None:
+                try:
+                    from safetensors import safe_open
+                except ImportError:
+                    return "❌ safetensors library not installed. Please install with: pip install safetensors"
+
+                try:
+                    from acestep.training.configs import LoKRConfig
+                    from acestep.training.lokr_utils import (
+                        check_lycoris_available,
+                        inject_lokr_into_dit,
+                        load_lokr_weights,
+                    )
+                except Exception as exc:
+                    return f"❌ LoKr dependencies not available: {exc}"
+
+                if not check_lycoris_available():
+                    return "❌ LyCORIS library not installed. Please install with: pip install lycoris-lora"
+
+                with safe_open(lokr_weights_path, framework="pt", device="cpu") as f:
+                    meta = f.metadata() or {}
+
+                algo = (meta.get("algo") or "").lower()
+                if algo and algo != "lokr":
+                    return f"❌ Unsupported adapter algo in metadata: {algo}"
+
+                lokr_cfg = LoKRConfig()
+                lokr_cfg_dict = None
+                if "lokr_config" in meta:
+                    try:
+                        lokr_cfg_dict = json.loads(meta["lokr_config"])
+                    except Exception as exc:
+                        return f"❌ Invalid lokr_config metadata: {exc}"
+                if isinstance(lokr_cfg_dict, dict):
+                    for key, value in lokr_cfg_dict.items():
+                        if hasattr(lokr_cfg, key):
+                            setattr(lokr_cfg, key, value)
+                else:
+                    logger.warning("LoKr metadata missing lokr_config; using default LoKr config")
+
+                logger.info(f"Loading LoKr adapter from {lokr_weights_path}")
+                self.model, self._lycoris_net, _ = inject_lokr_into_dit(self.model, lokr_cfg)
+                load_lokr_weights(self._lycoris_net, lokr_weights_path)
+
+                self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+                self.model.decoder.eval()
+
+                self._adapter_type = "lycoris_lokr"
+                self.lora_loaded = True
+                self.use_lora = True
+                self.lora_scale = 1.0
+                return f"✅ LoKr loaded from {lokr_weights_path}"
+
+            return (
+                "❌ Invalid adapter path. Expected a PEFT LoRA adapter directory "
+                "(adapter_config.json) or LoKr safetensors (lokr_weights.safetensors)."
             )
-            self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
-            self.model.decoder.eval()
-            
-            self.lora_loaded = True
-            self.use_lora = True  # Enable LoRA by default after loading
-            
-            logger.info(f"LoRA adapter loaded successfully from {lora_path}")
-            return f"✅ LoRA loaded from {lora_path}"
-            
         except Exception as e:
             logger.exception("Failed to load LoRA adapter")
             return f"❌ Failed to load LoRA: {str(e)}"
@@ -246,10 +315,18 @@ class AceStepHandler:
         try:
             import copy
             # Restore base decoder
+            old_decoder = self.model.decoder
             self.model.decoder = copy.deepcopy(self._base_decoder)
             self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
             self.model.decoder.eval()
-            
+
+            del old_decoder
+            self._base_decoder = None
+            self._adapter_type = None
+            self._lycoris_net = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             self.lora_loaded = False
             self.use_lora = False
             self.lora_scale = 1.0  # Reset scale to default
@@ -274,6 +351,19 @@ class AceStepHandler:
             return "❌ No LoRA adapter loaded. Please load a LoRA first."
         
         self.use_lora = use_lora
+
+        if self.lora_loaded and self._adapter_type == "lycoris_lokr" and self._lycoris_net is not None:
+            try:
+                multiplier = self.lora_scale if use_lora else 0.0
+                if hasattr(self._lycoris_net, "set_multiplier"):
+                    self._lycoris_net.set_multiplier(multiplier)
+                elif hasattr(self._lycoris_net, "multiplier"):
+                    self._lycoris_net.multiplier = multiplier
+                for module in getattr(self._lycoris_net, "loras", []) or []:
+                    if hasattr(module, "multiplier"):
+                        module.multiplier = multiplier
+            except Exception as e:
+                logger.warning(f"Could not toggle LoKr multiplier: {e}")
         
         # Use PEFT's enable/disable methods if available
         if self.lora_loaded and hasattr(self.model.decoder, 'disable_adapter_layers'):
@@ -307,6 +397,22 @@ class AceStepHandler:
         
         # Clamp scale to 0-1 range
         self.lora_scale = max(0.0, min(1.0, scale))
+
+        if self._adapter_type == "lycoris_lokr" and self._lycoris_net is not None:
+            try:
+                multiplier = self.lora_scale if self.use_lora else 0.0
+                if hasattr(self._lycoris_net, "set_multiplier"):
+                    self._lycoris_net.set_multiplier(multiplier)
+                elif hasattr(self._lycoris_net, "multiplier"):
+                    self._lycoris_net.multiplier = multiplier
+                for module in getattr(self._lycoris_net, "loras", []) or []:
+                    if hasattr(module, "multiplier"):
+                        module.multiplier = multiplier
+                logger.info(f"LoKr scale set to {self.lora_scale:.2f}")
+                return f"✅ LoRA scale: {self.lora_scale:.2f}"
+            except Exception as e:
+                logger.warning(f"Could not set LoKr scale: {e}")
+                return f"⚠️ Scale set to {self.lora_scale:.2f} (partial)"
         
         # Only apply scaling if LoRA is enabled
         if not self.use_lora:
@@ -357,6 +463,7 @@ class AceStepHandler:
             "loaded": self.lora_loaded,
             "active": self.use_lora,
             "scale": self.lora_scale,
+            "adapter_type": self._adapter_type,
         }
     
     def initialize_service(

@@ -35,6 +35,7 @@ modelscope
 peft>=0.18.0
 lightning>=2.0.0
 tensorboard>=2.0.0
+lycoris-lora
 
 # MLX dependencies (Apple Silicon native acceleration - macOS only)
 # Provides significant speedup for LLM inference on Apple Silicon GPUs

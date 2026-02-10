@@ -33,8 +33,8 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
     with gr.Tab(t("training.tab_title"), visible=not service_mode):
         gr.HTML("""
         <div style="text-align: center; padding: 10px; margin-bottom: 15px;">
-            <h2>🎵 LoRA Training for ACE-Step</h2>
-            <p>Build datasets from your audio files and train custom LoRA adapters</p>
+            <h2>🎵 Adapter Training for ACE-Step</h2>
+            <p>Build datasets from your audio files and train custom LoRA or LoKr adapters</p>
         </div>
         """)
         
@@ -342,7 +342,7 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                     lines=3,
                 )
             
-            # ==================== Training Tab ====================
+            # ==================== Train LoRA Tab ====================
             with gr.Tab(t("training.tab_train_lora")):
                 with gr.Row():
                     with gr.Column(scale=2):
@@ -521,6 +521,181 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                     label=t("training.export_status"),
                     interactive=False,
                 )
+
+            # ==================== Train LoKr Tab ====================
+            with gr.Tab("🚀 Train LoKr"):
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        gr.HTML("<h3>📊 Preprocessed Tensors</h3>")
+                        gr.Markdown(
+                            "Select the directory containing preprocessed tensor files (`.pt` files). "
+                            "These are created in the Dataset Builder tab."
+                        )
+
+                        lokr_training_tensor_dir = gr.Textbox(
+                            label="Preprocessed Tensors Directory",
+                            placeholder="./datasets/preprocessed_tensors",
+                            value="./datasets/preprocessed_tensors",
+                            info="Path to directory containing manifest.json and tensor .pt files.",
+                        )
+
+                        lokr_load_dataset_btn = gr.Button("Load Dataset", variant="secondary")
+
+                        lokr_training_dataset_info = gr.Textbox(
+                            label="Dataset Info",
+                            interactive=False,
+                            lines=3,
+                        )
+
+                    with gr.Column(scale=1):
+                        gr.HTML("<h3>⚙️ LoKr Settings</h3>")
+
+                        lokr_linear_dim = gr.Slider(
+                            minimum=4,
+                            maximum=256,
+                            step=4,
+                            value=64,
+                            label="LoKr Linear Dim",
+                            info="Adapter rank-like width for LoKr linear layers.",
+                        )
+                        lokr_linear_alpha = gr.Slider(
+                            minimum=4,
+                            maximum=512,
+                            step=4,
+                            value=128,
+                            label="LoKr Linear Alpha",
+                            info="Scaling factor for LoKr adapters.",
+                        )
+                        lokr_factor = gr.Number(
+                            label="LoKr Factor",
+                            value=-1,
+                            precision=0,
+                            info="-1 uses automatic Kronecker factor selection.",
+                        )
+                        lokr_decompose_both = gr.Checkbox(
+                            label="Decompose Both",
+                            value=False,
+                            info="Enable decomposition on both matrices.",
+                        )
+                        lokr_use_tucker = gr.Checkbox(
+                            label="Use Tucker",
+                            value=False,
+                            info="Enable Tucker decomposition mode.",
+                        )
+                        lokr_use_scalar = gr.Checkbox(
+                            label="Use Scalar",
+                            value=False,
+                            info="Enable scalar calibration in LyCORIS.",
+                        )
+                        lokr_weight_decompose = gr.Checkbox(
+                            label="Weight Decompose (DoRA)",
+                            value=True,
+                            info="Enable DoRA-style weight decomposition when supported.",
+                        )
+
+                gr.HTML("<hr><h3>🎛️ Training Parameters</h3>")
+
+                with gr.Row():
+                    lokr_learning_rate = gr.Number(
+                        label="Learning Rate",
+                        value=3e-3,
+                        info="LoKr commonly uses a higher LR than LoRA. Tune per dataset.",
+                    )
+
+                    lokr_train_epochs = gr.Slider(
+                        minimum=1,
+                        maximum=4000,
+                        step=1,
+                        value=50,
+                        label="Max Epochs",
+                    )
+
+                    lokr_train_batch_size = gr.Slider(
+                        minimum=1,
+                        maximum=8,
+                        step=1,
+                        value=1,
+                        label="Batch Size",
+                    )
+
+                    lokr_gradient_accumulation = gr.Slider(
+                        minimum=1,
+                        maximum=16,
+                        step=1,
+                        value=1,
+                        label="Gradient Accumulation",
+                    )
+
+                with gr.Row():
+                    lokr_save_every_n_epochs = gr.Slider(
+                        minimum=50,
+                        maximum=1000,
+                        step=50,
+                        value=200,
+                        label="Save Every N Epochs",
+                    )
+
+                    lokr_training_shift = gr.Slider(
+                        minimum=1.0,
+                        maximum=5.0,
+                        step=0.5,
+                        value=3.0,
+                        label="Shift",
+                        info="Turbo model training timestep shift.",
+                    )
+
+                    lokr_training_seed = gr.Number(
+                        label="Seed",
+                        value=42,
+                        precision=0,
+                    )
+
+                with gr.Row():
+                    lokr_output_dir = gr.Textbox(
+                        label="Output Directory",
+                        value="./lokr_output",
+                        placeholder="./lokr_output",
+                        info="Where LoKr checkpoints and final weights will be written.",
+                    )
+
+                gr.HTML("<hr>")
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        start_lokr_training_btn = gr.Button(
+                            "Start LoKr Training",
+                            variant="primary",
+                            size="lg",
+                        )
+                    with gr.Column(scale=1):
+                        stop_lokr_training_btn = gr.Button(
+                            "Stop Training",
+                            variant="stop",
+                            size="lg",
+                        )
+
+                lokr_training_progress = gr.Textbox(
+                    label="Training Progress",
+                    interactive=False,
+                    lines=2,
+                )
+
+                with gr.Row():
+                    lokr_training_log = gr.Textbox(
+                        label="Training Log",
+                        interactive=False,
+                        lines=10,
+                        max_lines=15,
+                        scale=1,
+                    )
+                    lokr_training_loss_plot = gr.LinePlot(
+                        x="step",
+                        y="loss",
+                        title="LoKr Training Loss",
+                        x_title=t("training.step"),
+                        y_title=t("training.loss"),
+                        scale=1,
+                    )
     
     # Store dataset builder state
     dataset_builder_state = gr.State(None)
@@ -598,5 +773,29 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
         "export_path": export_path,
         "export_lora_btn": export_lora_btn,
         "export_status": export_status,
+        # LoKr training
+        "lokr_training_tensor_dir": lokr_training_tensor_dir,
+        "lokr_load_dataset_btn": lokr_load_dataset_btn,
+        "lokr_training_dataset_info": lokr_training_dataset_info,
+        "lokr_linear_dim": lokr_linear_dim,
+        "lokr_linear_alpha": lokr_linear_alpha,
+        "lokr_factor": lokr_factor,
+        "lokr_decompose_both": lokr_decompose_both,
+        "lokr_use_tucker": lokr_use_tucker,
+        "lokr_use_scalar": lokr_use_scalar,
+        "lokr_weight_decompose": lokr_weight_decompose,
+        "lokr_learning_rate": lokr_learning_rate,
+        "lokr_train_epochs": lokr_train_epochs,
+        "lokr_train_batch_size": lokr_train_batch_size,
+        "lokr_gradient_accumulation": lokr_gradient_accumulation,
+        "lokr_save_every_n_epochs": lokr_save_every_n_epochs,
+        "lokr_training_shift": lokr_training_shift,
+        "lokr_training_seed": lokr_training_seed,
+        "lokr_output_dir": lokr_output_dir,
+        "start_lokr_training_btn": start_lokr_training_btn,
+        "stop_lokr_training_btn": stop_lokr_training_btn,
+        "lokr_training_progress": lokr_training_progress,
+        "lokr_training_log": lokr_training_log,
+        "lokr_training_loss_plot": lokr_training_loss_plot,
         "training_state": training_state,
     }

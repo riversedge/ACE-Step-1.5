@@ -182,11 +182,17 @@ def save_lokr_training_checkpoint(
     global_step: int,
     output_dir: str,
     lokr_config: Optional[LoKRConfig] = None,
+    run_metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Save LoKr weights plus optimizer/scheduler state."""
     os.makedirs(output_dir, exist_ok=True)
 
-    metadata = {"lokr_config": lokr_config.to_dict()} if lokr_config is not None else None
+    metadata: Dict[str, Any] = {}
+    if lokr_config is not None:
+        metadata["lokr_config"] = lokr_config.to_dict()
+    if run_metadata is not None:
+        metadata["run_metadata"] = run_metadata
+    metadata = metadata or None
     save_lokr_weights(lycoris_net, output_dir, metadata=metadata)
 
     state = {
@@ -197,6 +203,8 @@ def save_lokr_training_checkpoint(
     }
     if lokr_config is not None:
         state["lokr_config"] = lokr_config.to_dict()
+    if run_metadata is not None:
+        state["run_metadata"] = run_metadata
 
     state_path = os.path.join(output_dir, "training_state.pt")
     torch.save(state, state_path)

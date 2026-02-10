@@ -6,6 +6,7 @@ Contains all event handler functions for the dataset builder and training UI.
 
 import os
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple, Optional
 from loguru import logger
 import gradio as gr
@@ -1046,6 +1047,10 @@ def export_lokr(
     checkpoint_dir = os.path.join(lokr_output_dir, "checkpoints")
 
     source_file = ""
+    source_origin = "final"
+    latest_checkpoint = None
+    latest_epoch = None
+    training_state_path = None
     if os.path.exists(os.path.join(final_dir, "lokr_weights.safetensors")):
         source_file = os.path.join(final_dir, "lokr_weights.safetensors")
     elif os.path.exists(checkpoint_dir):
@@ -1054,7 +1059,14 @@ def export_lokr(
             return "❌ No checkpoints found"
         checkpoints.sort(key=lambda x: int(x.split("_")[1]))
         latest = checkpoints[-1]
+        latest_checkpoint = latest
+        source_origin = f"checkpoints/{latest}"
+        try:
+            latest_epoch = int(latest.split("_")[1])
+        except Exception:
+            latest_epoch = None
         candidate = os.path.join(checkpoint_dir, latest, "lokr_weights.safetensors")
+        training_state_path = os.path.join(checkpoint_dir, latest, "training_state.pt")
         if not os.path.exists(candidate):
             return f"❌ No LoKr weights found in latest checkpoint: {latest}"
         source_file = candidate
@@ -1063,12 +1075,125 @@ def export_lokr(
 
     try:
         import shutil
+        import torch
+
+        # Even when exporting from final/, try to enrich metadata from the latest
+        # checkpoint training_state (epoch/step/run metadata), if available.
+        if latest_checkpoint is None and os.path.exists(checkpoint_dir):
+            checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith("epoch_")]
+            if checkpoints:
+                checkpoints.sort(key=lambda x: int(x.split("_")[1]))
+                latest_checkpoint = checkpoints[-1]
+                try:
+                    latest_epoch = int(latest_checkpoint.split("_")[1])
+                except Exception:
+                    latest_epoch = latest_epoch
+                training_state_path = os.path.join(checkpoint_dir, latest_checkpoint, "training_state.pt")
+
+        safetensors_meta: Dict[str, Any] = {}
+        lokr_config = None
+        run_metadata = None
+        global_step = None
+
+        try:
+            from safetensors import safe_open
+            with safe_open(source_file, framework="pt", device="cpu") as f:
+                safetensors_meta = dict(f.metadata() or {})
+        except Exception as exc:
+            logger.warning(f"Could not read LoKr safetensors metadata: {exc}")
+
+        if isinstance(safetensors_meta.get("lokr_config"), str):
+            try:
+                lokr_config = json.loads(safetensors_meta["lokr_config"])
+            except Exception:
+                lokr_config = None
+        if isinstance(safetensors_meta.get("run_metadata"), str):
+            try:
+                run_metadata = json.loads(safetensors_meta["run_metadata"])
+            except Exception:
+                run_metadata = None
+
+        if training_state_path and os.path.exists(training_state_path):
+            try:
+                state = torch.load(training_state_path, map_location="cpu")
+                global_step = state.get("global_step")
+                latest_epoch = state.get("epoch", latest_epoch)
+                if run_metadata is None:
+                    run_metadata = state.get("run_metadata")
+                if lokr_config is None:
+                    lokr_config = state.get("lokr_config")
+            except Exception as exc:
+                logger.warning(f"Could not read LoKr training state: {exc}")
+
+        training_cfg = run_metadata.get("training_config", {}) if isinstance(run_metadata, dict) else {}
+        num_samples = run_metadata.get("num_samples") if isinstance(run_metadata, dict) else None
+
+        metadata_payload = {
+            "adapter_type": "LoKr",
+            "format": "lycoris_safetensors",
+            "exported_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source": {
+                "output_dir": lokr_output_dir,
+                "origin": source_origin,
+                "latest_checkpoint": latest_checkpoint,
+                "training_state_present": bool(training_state_path and os.path.exists(training_state_path)),
+            },
+            "training": {
+                "latest_epoch": latest_epoch,
+                "global_step": global_step,
+                "num_samples": num_samples,
+                "learning_rate": training_cfg.get("learning_rate"),
+                "batch_size": training_cfg.get("batch_size"),
+                "gradient_accumulation_steps": training_cfg.get("gradient_accumulation_steps"),
+                "max_epochs": training_cfg.get("max_epochs"),
+                "save_every_n_epochs": training_cfg.get("save_every_n_epochs"),
+                "shift": training_cfg.get("shift"),
+                "seed": training_cfg.get("seed"),
+            },
+            "lokr_config": lokr_config,
+            "safetensors_metadata": safetensors_meta,
+        }
+
+        def _model_card_text(weights_ref: str) -> str:
+            return (
+                "# LoKr Adapter Model Card\n\n"
+                "## Summary\n"
+                "- Adapter type: LoKr (LyCORIS)\n"
+                "- Weights file: "
+                f"`{weights_ref}`\n"
+                "- Exported (UTC): "
+                f"`{metadata_payload['exported_at_utc']}`\n\n"
+                "## Training Snapshot\n"
+                f"- Latest epoch: `{metadata_payload['training']['latest_epoch']}`\n"
+                f"- Global step: `{metadata_payload['training']['global_step']}`\n"
+                f"- Dataset samples: `{metadata_payload['training']['num_samples']}`\n"
+                f"- Learning rate: `{metadata_payload['training']['learning_rate']}`\n"
+                f"- Batch size: `{metadata_payload['training']['batch_size']}`\n"
+                f"- Gradient accumulation: `{metadata_payload['training']['gradient_accumulation_steps']}`\n"
+                f"- Max epochs: `{metadata_payload['training']['max_epochs']}`\n"
+                f"- Save every N epochs: `{metadata_payload['training']['save_every_n_epochs']}`\n"
+                f"- Shift: `{metadata_payload['training']['shift']}`\n"
+                f"- Seed: `{metadata_payload['training']['seed']}`\n\n"
+                "## LoKr Config\n"
+                f"```json\n{json.dumps(metadata_payload['lokr_config'], indent=2, ensure_ascii=True)}\n```\n\n"
+                "## Notes\n"
+                "- `metadata.json` includes machine-readable export and training metadata.\n"
+                "- Load this adapter via the existing adapter loader by selecting this safetensors file\n"
+                "  (or a directory containing `lokr_weights.safetensors`).\n"
+            )
 
         export_path = export_path.strip()
         if export_path.lower().endswith(".safetensors"):
             os.makedirs(os.path.dirname(export_path) if os.path.dirname(export_path) else ".", exist_ok=True)
             shutil.copy2(source_file, export_path)
-            return f"✅ LoKr exported to {export_path}"
+            base, _ = os.path.splitext(export_path)
+            metadata_path = f"{base}.metadata.json"
+            readme_path = f"{base}.README.md"
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(metadata_payload, f, indent=2, ensure_ascii=True)
+            with open(readme_path, "w", encoding="utf-8") as f:
+                f.write(_model_card_text(os.path.basename(export_path)))
+            return f"✅ LoKr exported to {export_path} (+ {metadata_path}, {readme_path})"
 
         if os.path.exists(export_path) and not os.path.isdir(export_path):
             return f"❌ Export path exists and is not a directory: {export_path}"
@@ -1076,7 +1201,13 @@ def export_lokr(
         os.makedirs(export_path, exist_ok=True)
         dst_file = os.path.join(export_path, "lokr_weights.safetensors")
         shutil.copy2(source_file, dst_file)
-        return f"✅ LoKr exported to {dst_file}"
+        metadata_path = os.path.join(export_path, "metadata.json")
+        readme_path = os.path.join(export_path, "README.md")
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata_payload, f, indent=2, ensure_ascii=True)
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(_model_card_text("lokr_weights.safetensors"))
+        return f"✅ LoKr exported to {dst_file} (+ metadata.json, README.md)"
 
     except Exception as e:
         logger.exception("LoKr export error")

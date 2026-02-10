@@ -1010,6 +1010,7 @@ class LoKRTrainer:
         self.module = None
         self.fabric = None
         self.is_training = False
+        self.run_metadata: Dict[str, Any] = {}
 
     def train_from_preprocessed(
         self,
@@ -1079,6 +1080,12 @@ class LoKRTrainer:
             if len(data_module.train_dataset) == 0:
                 yield 0, 0.0, "❌ No valid samples found in tensor directory"
                 return
+
+            self.run_metadata = {
+                "tensor_dir": tensor_dir,
+                "num_samples": int(len(data_module.train_dataset)),
+                "training_config": self.training_config.to_dict(),
+            }
 
             yield 0, 0.0, f"📂 Loaded {len(data_module.train_dataset)} preprocessed samples"
             if ckpt_enabled:
@@ -1306,14 +1313,18 @@ class LoKRTrainer:
                     global_step,
                     checkpoint_dir,
                     lokr_config=self.lokr_config,
+                    run_metadata=self.run_metadata,
                 )
                 yield global_step, avg_epoch_loss, f"💾 Checkpoint saved at epoch {epoch+1}"
 
         final_path = os.path.join(self.training_config.output_dir, "final")
+        final_metadata: Dict[str, Any] = {"lokr_config": self.lokr_config.to_dict()}
+        if self.run_metadata:
+            final_metadata["run_metadata"] = self.run_metadata
         save_lokr_weights(
             self.module.lycoris_net,
             final_path,
-            metadata={"lokr_config": self.lokr_config.to_dict()},
+            metadata=final_metadata,
         )
         final_loss = self.module.training_losses[-1] if self.module.training_losses else 0.0
         yield global_step, final_loss, f"✅ Training complete! LoKr saved to {final_path}"
@@ -1418,14 +1429,18 @@ class LoKRTrainer:
                     global_step,
                     checkpoint_dir,
                     lokr_config=self.lokr_config,
+                    run_metadata=self.run_metadata,
                 )
                 yield global_step, avg_epoch_loss, "💾 Checkpoint saved"
 
         final_path = os.path.join(self.training_config.output_dir, "final")
+        final_metadata: Dict[str, Any] = {"lokr_config": self.lokr_config.to_dict()}
+        if self.run_metadata:
+            final_metadata["run_metadata"] = self.run_metadata
         save_lokr_weights(
             self.module.lycoris_net,
             final_path,
-            metadata={"lokr_config": self.lokr_config.to_dict()},
+            metadata=final_metadata,
         )
         final_loss = self.module.training_losses[-1] if self.module.training_losses else 0.0
         yield global_step, final_loss, f"✅ Training complete! LoKr saved to {final_path}"

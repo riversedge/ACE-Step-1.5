@@ -322,6 +322,14 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                 gr.Markdown(t('training.step5_details'))
                 
                 with gr.Row():
+                    preprocess_mode = gr.Dropdown(
+                        label="Preprocess For",
+                        choices=["LoRA", "LoKr"],
+                        value="LoRA",
+                        info="LoRA keeps compatibility mode; LoKr uses per-sample source-style context.",
+                    )
+
+                with gr.Row():
                     with gr.Column(scale=3):
                         preprocess_output_dir = gr.Textbox(
                             label=t("training.tensor_output_dir"),
@@ -516,6 +524,15 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                         placeholder="./lora_output/my_lora",
                     )
                     export_lora_btn = gr.Button(t("training.export_lora_btn"), variant="secondary")
+
+                with gr.Row():
+                    lora_export_epoch = gr.Dropdown(
+                        choices=["Latest (auto)"],
+                        value="Latest (auto)",
+                        label="Checkpoint Epoch",
+                        info="Select a specific epoch checkpoint to export, or keep Latest (auto).",
+                    )
+                    refresh_lora_export_epochs_btn = gr.Button("↻ Refresh Epochs", variant="secondary")
                 
                 export_status = gr.Textbox(
                     label=t("training.export_status"),
@@ -769,6 +786,7 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
         "load_existing_dataset_path": load_existing_dataset_path,
         "load_existing_dataset_btn": load_existing_dataset_btn,
         "load_existing_status": load_existing_status,
+        "preprocess_mode": preprocess_mode,
         "preprocess_output_dir": preprocess_output_dir,
         "preprocess_btn": preprocess_btn,
         "preprocess_progress": preprocess_progress,
@@ -795,6 +813,8 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
         "training_log": training_log,
         "training_loss_plot": training_loss_plot,
         "export_path": export_path,
+        "lora_export_epoch": lora_export_epoch,
+        "refresh_lora_export_epochs_btn": refresh_lora_export_epochs_btn,
         "export_lora_btn": export_lora_btn,
         "export_status": export_status,
         # LoKr training

@@ -116,6 +116,7 @@ class TrainingConfig:
     output_dir: str = "./lora_output"
     
     # Data loading
+    val_split: float = 0.0
     num_workers: int = 4
     pin_memory: bool = True
     prefetch_factor: int = 2
@@ -141,6 +142,7 @@ class TrainingConfig:
             "mixed_precision": self.mixed_precision,
             "seed": self.seed,
             "output_dir": self.output_dir,
+            "val_split": self.val_split,
             "num_workers": self.num_workers,
             "pin_memory": self.pin_memory,
             "prefetch_factor": self.prefetch_factor,

@@ -402,6 +402,7 @@ def load_existing_dataset_for_preprocess(
 
 def preprocess_dataset(
     output_dir: str,
+    preprocess_mode: str,
     dit_handler,
     builder_state: Optional[DatasetBuilder],
     progress=None,
@@ -437,10 +438,15 @@ def preprocess_dataset(
                 pass
     
     # Run preprocessing
+    mode = str(preprocess_mode or "lora").strip().lower()
+    if mode not in {"lora", "lokr"}:
+        mode = "lora"
+
     t0 = debug_start_for("dataset", "preprocess_to_tensors")
     output_paths, status = builder_state.preprocess_to_tensors(
         dit_handler=dit_handler,
         output_dir=output_dir.strip(),
+        preprocess_mode=mode,
         progress_callback=progress_callback,
     )
     debug_end_for("dataset", "preprocess_to_tensors", t0)
@@ -985,6 +991,7 @@ def start_lokr_training(
 def export_lora(
     export_path: str,
     lora_output_dir: str,
+    selected_epoch: Optional[str] = None,
 ) -> str:
     """Export the trained LoRA weights.
     
@@ -994,24 +1001,50 @@ def export_lora(
     if not export_path or not export_path.strip():
         return "� Please enter an export path"
     
-    # Check if there's a trained model to export
     final_dir = os.path.join(lora_output_dir, "final")
     checkpoint_dir = os.path.join(lora_output_dir, "checkpoints")
-    
-    # Prefer final, fallback to checkpoints
-    if os.path.exists(final_dir):
+    default_epoch_choice = "Latest (auto)"
+
+    chosen_epoch = (selected_epoch or "").strip()
+    if not chosen_epoch:
+        chosen_epoch = default_epoch_choice
+
+    checkpoint_names: List[str] = []
+    if os.path.isdir(checkpoint_dir):
+        for d in os.listdir(checkpoint_dir):
+            if not d.startswith("epoch_"):
+                continue
+            try:
+                int(d.split("_")[1])
+            except Exception:
+                continue
+            adapter_dir = os.path.join(checkpoint_dir, d, "adapter")
+            has_adapter = os.path.isdir(adapter_dir) and (
+                os.path.exists(os.path.join(adapter_dir, "adapter_model.safetensors"))
+                or os.path.exists(os.path.join(adapter_dir, "adapter_model.bin"))
+                or os.path.exists(os.path.join(adapter_dir, "adapter_config.json"))
+            )
+            if has_adapter:
+                checkpoint_names.append(d)
+        checkpoint_names.sort(key=lambda x: int(x.split("_")[1]))
+
+    explicit_epoch = chosen_epoch not in {default_epoch_choice, "latest", "Latest", "auto", "Auto"}
+    if explicit_epoch:
+        requested = chosen_epoch
+        if requested.isdigit():
+            requested = f"epoch_{requested}"
+        if requested not in checkpoint_names:
+            return (
+                f"❌ Selected epoch not found: {chosen_epoch}. "
+                f"Available: {', '.join(checkpoint_names) if checkpoint_names else '(none)'}"
+            )
+        source_path = os.path.join(checkpoint_dir, requested)
+    elif os.path.exists(final_dir):
         source_path = final_dir
-    elif os.path.exists(checkpoint_dir):
-        # Find the latest checkpoint
-        checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith("epoch_")]
-        if not checkpoints:
-            return "� No checkpoints found"
-        
-        checkpoints.sort(key=lambda x: int(x.split("_")[1]))
-        latest = checkpoints[-1]
-        source_path = os.path.join(checkpoint_dir, latest)
+    elif checkpoint_names:
+        source_path = os.path.join(checkpoint_dir, checkpoint_names[-1])
     else:
-        return f"� No trained model found in {lora_output_dir}"
+        return f"❌ No trained LoRA model found in {lora_output_dir}"
     
     try:
         import shutil
@@ -1024,11 +1057,47 @@ def export_lora(
         
         shutil.copytree(source_path, export_path)
         
-        return f"� LoRA exported to {export_path}"
+        return f"✅ LoRA exported to {export_path}"
         
     except Exception as e:
         logger.exception("Export error")
-        return f"� Export failed: {str(e)}"
+        return f"❌ Export failed: {str(e)}"
+
+
+def list_lora_export_epochs(lora_output_dir: str) -> Tuple[Any, str]:
+    """List available LoRA checkpoint epochs for export dropdown."""
+    default_choice = "Latest (auto)"
+    if not lora_output_dir or not lora_output_dir.strip():
+        return gr.update(choices=[default_choice], value=default_choice), "⚠️ Enter LoRA output directory first"
+
+    checkpoint_dir = os.path.join(lora_output_dir.strip(), "checkpoints")
+    if not os.path.isdir(checkpoint_dir):
+        return gr.update(choices=[default_choice], value=default_choice), "ℹ️ No checkpoints found; export will use latest available weights"
+
+    checkpoints = []
+    for d in os.listdir(checkpoint_dir):
+        if not d.startswith("epoch_"):
+            continue
+        adapter_dir = os.path.join(checkpoint_dir, d, "adapter")
+        has_adapter = os.path.isdir(adapter_dir) and (
+            os.path.exists(os.path.join(adapter_dir, "adapter_model.safetensors"))
+            or os.path.exists(os.path.join(adapter_dir, "adapter_model.bin"))
+            or os.path.exists(os.path.join(adapter_dir, "adapter_config.json"))
+        )
+        if not has_adapter:
+            continue
+        try:
+            epoch_num = int(d.split("_")[1])
+        except Exception:
+            continue
+        checkpoints.append((epoch_num, d))
+
+    if not checkpoints:
+        return gr.update(choices=[default_choice], value=default_choice), "ℹ️ No exportable epoch checkpoints found"
+
+    checkpoints.sort(key=lambda x: x[0], reverse=True)
+    choices = [default_choice] + [d for _, d in checkpoints]
+    return gr.update(choices=choices, value=default_choice), f"✅ Found {len(checkpoints)} LoRA checkpoints"
 
 
 def list_lokr_export_epochs(lokr_output_dir: str) -> Tuple[Any, str]:

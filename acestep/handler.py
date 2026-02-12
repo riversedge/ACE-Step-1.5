@@ -205,6 +205,7 @@ class AceStepHandler:
         elif lora_path.endswith(".safetensors"):
             lokr_weights_path = lora_path
 
+        backup_decoder = None
         try:
             import copy
 
@@ -213,7 +214,8 @@ class AceStepHandler:
                 logger.info("Restored base decoder before loading new adapter")
 
             # Always backup current clean decoder before loading an adapter.
-            self._base_decoder = copy.deepcopy(self.model.decoder)
+            backup_decoder = copy.deepcopy(self.model.decoder)
+            self._base_decoder = backup_decoder
             logger.info("Base decoder backed up")
 
             if is_peft_adapter_dir:
@@ -298,6 +300,24 @@ class AceStepHandler:
             )
         except Exception as e:
             logger.exception("Failed to load LoRA adapter")
+            # Ensure partial adapter injection/load failures never leave decoder mutated.
+            try:
+                import copy
+                if backup_decoder is not None:
+                    self.model.decoder = copy.deepcopy(backup_decoder)
+                    self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+                    self.model.decoder.eval()
+                    logger.info("Restored base decoder after adapter load failure")
+            except Exception:
+                logger.exception("Failed to restore base decoder after adapter load failure")
+
+            # Reset adapter state so runtime doesn't think an adapter is active.
+            self.lora_loaded = False
+            self.use_lora = False
+            self.lora_scale = 1.0
+            self._adapter_type = None
+            self._lycoris_net = None
+            self._base_decoder = None
             return f"❌ Failed to load LoRA: {str(e)}"
     
     def unload_lora(self) -> str:

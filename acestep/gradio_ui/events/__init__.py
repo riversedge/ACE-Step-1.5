@@ -1175,11 +1175,12 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
     
     # Preprocess dataset to tensor files
     training_section["preprocess_btn"].click(
-        fn=lambda output_dir, state: train_h.preprocess_dataset(
-            output_dir, dit_handler, state
+        fn=lambda output_dir, preprocess_mode, state: train_h.preprocess_dataset(
+            output_dir, preprocess_mode, dit_handler, state
         ),
         inputs=[
             training_section["preprocess_output_dir"],
+            training_section["preprocess_mode"],
             training_section["dataset_builder_state"],
         ],
         outputs=[training_section["preprocess_progress"]]
@@ -1341,8 +1342,27 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
         inputs=[
             training_section["export_path"],
             training_section["lora_output_dir"],
+            training_section["lora_export_epoch"],
         ],
         outputs=[training_section["export_status"]]
+    )
+
+    # Refresh LoRA export epoch dropdown
+    training_section["refresh_lora_export_epochs_btn"].click(
+        fn=train_h.list_lora_export_epochs,
+        inputs=[training_section["lora_output_dir"]],
+        outputs=[
+            training_section["lora_export_epoch"],
+            training_section["export_status"],
+        ],
+    )
+    training_section["lora_output_dir"].change(
+        fn=train_h.list_lora_export_epochs,
+        inputs=[training_section["lora_output_dir"]],
+        outputs=[
+            training_section["lora_export_epoch"],
+            training_section["export_status"],
+        ],
     )
 
     # Refresh LoKr export epoch dropdown

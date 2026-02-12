@@ -106,6 +106,57 @@ def _count_nonfinite_grads(params: List[torch.nn.Parameter]) -> Tuple[int, int]:
     return nonfinite, total_with_grad
 
 
+def _build_param_name_lookup(module: nn.Module, extra_module: Optional[nn.Module] = None) -> Dict[int, str]:
+    """Build a best-effort id(param) -> name lookup for debug logging."""
+    lookup: Dict[int, str] = {}
+    for name, p in module.named_parameters():
+        lookup[id(p)] = name
+    if extra_module is not None:
+        for name, p in extra_module.named_parameters():
+            lookup.setdefault(id(p), f"lycoris_net.{name}")
+    return lookup
+
+
+def _count_nonfinite_grads_detailed(
+    params: List[torch.nn.Parameter],
+    param_name_lookup: Dict[int, str],
+    detail_limit: int = 8,
+) -> Tuple[int, int, List[str]]:
+    """Count non-finite grads and return up to `detail_limit` offending tensor details."""
+    nonfinite = 0
+    total_with_grad = 0
+    details: List[str] = []
+
+    for p in params:
+        g = p.grad
+        if g is None:
+            continue
+        total_with_grad += 1
+        if torch.isfinite(g).all():
+            continue
+
+        nonfinite += 1
+        if len(details) >= detail_limit:
+            continue
+
+        pname = param_name_lookup.get(id(p), f"<unnamed:{id(p)}>")
+        g32 = g.detach().float()
+        nan_count = int(torch.isnan(g32).sum().item())
+        inf_count = int(torch.isinf(g32).sum().item())
+        finite_vals = g32[torch.isfinite(g32)]
+        max_abs_finite = float(finite_vals.abs().max().item()) if finite_vals.numel() else float("nan")
+
+        p32 = p.detach().float()
+        param_nonfinite = int((~torch.isfinite(p32)).sum().item())
+        details.append(
+            f"{pname} | shape={tuple(p.shape)} grad_dtype={g.dtype} "
+            f"nan={nan_count} inf={inf_count} max_abs_finite={max_abs_finite:.3e} "
+            f"param_nonfinite={param_nonfinite}"
+        )
+
+    return nonfinite, total_with_grad, details
+
+
 def _ensure_optimizer_params_fp32(optimizer: torch.optim.Optimizer) -> Tuple[int, int]:
     """Force optimizer parameter tensors to fp32 when trainable."""
     casted = 0
@@ -505,6 +556,7 @@ class LoRATrainer:
                 prefetch_factor=self.training_config.prefetch_factor,
                 persistent_workers=self.training_config.persistent_workers,
                 pin_memory_device=self.training_config.pin_memory_device,
+                val_split=self.training_config.val_split,
             )
             
             # Setup data
@@ -550,6 +602,7 @@ class LoRATrainer:
         device_type = self.module.device_type
         precision = _select_fabric_precision(device_type)
         accelerator = device_type if device_type in ("cuda", "xpu", "mps", "cpu") else "auto"
+        manual_nonfinite_check = not precision.endswith("-mixed")
         
         # Create TensorBoard logger when available; continue without it otherwise.
         tb_logger = None
@@ -573,6 +626,10 @@ class LoRATrainer:
         self.fabric.launch()
         
         yield 0, 0.0, f"🚀 Starting training (device: {device_type}, precision: {precision})..."
+        if not manual_nonfinite_check:
+            logger.info(
+                "Non-finite grad pre-check disabled for mixed precision; relying on AMP/GradScaler step handling."
+            )
         
         # Keep decoder weights in a stable dtype before optimizer/Fabric setup.
         # MPS stays in fp32 weights for stability; computation still uses fp16
@@ -1100,6 +1157,7 @@ class LoKRTrainer:
                 prefetch_factor=self.training_config.prefetch_factor,
                 persistent_workers=self.training_config.persistent_workers,
                 pin_memory_device=self.training_config.pin_memory_device,
+                val_split=self.training_config.val_split,
             )
             data_module.setup('fit')
 
@@ -1146,6 +1204,7 @@ class LoKRTrainer:
         device_type = self.module.device_type
         precision = _select_fabric_precision(device_type)
         accelerator = device_type if device_type in ("cuda", "xpu", "mps", "cpu") else "auto"
+        manual_nonfinite_check = not precision.endswith("-mixed")
 
         tb_logger = None
         try:
@@ -1167,6 +1226,11 @@ class LoKRTrainer:
         self.fabric.launch()
 
         yield 0, 0.0, f"🚀 Starting training (device: {device_type}, precision: {precision})..."
+        if not manual_nonfinite_check:
+            logger.info(
+                "LoKr mixed precision detected: disabling pre-unscale non-finite grad checks; "
+                "relying on AMP/GradScaler handling."
+            )
 
         if device_type == "mps" or precision.endswith("-mixed"):
             self.module.model.decoder = self.module.model.decoder.to(dtype=torch.float32)
@@ -1183,6 +1247,10 @@ class LoKRTrainer:
 
         train_loader = data_module.train_dataloader()
         trainable_params = _collect_lokr_trainable_params(
+            self.module.model,
+            getattr(self.module, "lycoris_net", None),
+        )
+        param_name_lookup = _build_param_name_lookup(
             self.module.model,
             getattr(self.module, "lycoris_net", None),
         )
@@ -1259,16 +1327,27 @@ class LoKRTrainer:
                 accumulation_step += 1
 
                 if accumulation_step >= self.training_config.gradient_accumulation_steps:
-                    nonfinite_grads, grad_tensors = _count_nonfinite_grads(trainable_params)
-                    if nonfinite_grads > 0:
-                        optimizer.zero_grad(set_to_none=True)
-                        yield global_step, float("nan"), (
-                            f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
-                            "skipping optimizer step"
+                    if manual_nonfinite_check:
+                        nonfinite_grads, grad_tensors, nonfinite_details = _count_nonfinite_grads_detailed(
+                            trainable_params,
+                            param_name_lookup,
+                            detail_limit=10,
                         )
-                        accumulated_loss = 0.0
-                        accumulation_step = 0
-                        continue
+                        if nonfinite_grads > 0:
+                            if nonfinite_details:
+                                logger.warning(
+                                    f"LoKr non-finite gradients ({nonfinite_grads}/{grad_tensors}) at epoch "
+                                    f"{epoch+1}, step {global_step}. Top offending tensors:\n"
+                                    + "\n".join(f"  - {d}" for d in nonfinite_details)
+                                )
+                            optimizer.zero_grad(set_to_none=True)
+                            yield global_step, float("nan"), (
+                                f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
+                                "skipping optimizer step (see logs for tensor names)"
+                            )
+                            accumulated_loss = 0.0
+                            accumulation_step = 0
+                            continue
 
                     self.fabric.clip_gradients(
                         self.module.model.decoder,
@@ -1297,40 +1376,52 @@ class LoKRTrainer:
                     accumulation_step = 0
 
             if accumulation_step > 0:
-                nonfinite_grads, grad_tensors = _count_nonfinite_grads(trainable_params)
-                if nonfinite_grads > 0:
-                    optimizer.zero_grad(set_to_none=True)
-                    yield global_step, float("nan"), (
-                        f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
-                        "skipping optimizer remainder step"
+                if manual_nonfinite_check:
+                    nonfinite_grads, grad_tensors, nonfinite_details = _count_nonfinite_grads_detailed(
+                        trainable_params,
+                        param_name_lookup,
+                        detail_limit=10,
                     )
-                    accumulated_loss = 0.0
-                    accumulation_step = 0
-                else:
-                    self.fabric.clip_gradients(
-                        self.module.model.decoder,
-                        optimizer,
-                        max_norm=self.training_config.max_grad_norm,
-                        error_if_nonfinite=False,
-                    )
-
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    global_step += 1
-                    avg_loss = accumulated_loss / accumulation_step
-                    if global_step % self.training_config.log_every_n_steps == 0:
-                        self.fabric.log("train/loss", avg_loss, step=global_step)
-                        self.fabric.log("train/lr", scheduler.get_last_lr()[0], step=global_step)
-                        yield global_step, avg_loss, (
-                            f"Epoch {epoch+1}/{self.training_config.max_epochs}, "
-                            f"Step {global_step}, Loss: {avg_loss:.4f}"
+                    if nonfinite_grads > 0:
+                        if nonfinite_details:
+                            logger.warning(
+                                f"LoKr non-finite remainder gradients ({nonfinite_grads}/{grad_tensors}) at epoch "
+                                f"{epoch+1}, step {global_step}. Top offending tensors:\n"
+                                + "\n".join(f"  - {d}" for d in nonfinite_details)
+                            )
+                        optimizer.zero_grad(set_to_none=True)
+                        yield global_step, float("nan"), (
+                            f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
+                            "skipping optimizer remainder step (see logs for tensor names)"
                         )
+                        accumulated_loss = 0.0
+                        accumulation_step = 0
+                        continue
 
-                    epoch_loss += avg_loss
-                    num_updates += 1
-                    accumulated_loss = 0.0
-                    accumulation_step = 0
+                self.fabric.clip_gradients(
+                    self.module.model.decoder,
+                    optimizer,
+                    max_norm=self.training_config.max_grad_norm,
+                    error_if_nonfinite=False,
+                )
+
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+                avg_loss = accumulated_loss / accumulation_step
+                if global_step % self.training_config.log_every_n_steps == 0:
+                    self.fabric.log("train/loss", avg_loss, step=global_step)
+                    self.fabric.log("train/lr", scheduler.get_last_lr()[0], step=global_step)
+                    yield global_step, avg_loss, (
+                        f"Epoch {epoch+1}/{self.training_config.max_epochs}, "
+                        f"Step {global_step}, Loss: {avg_loss:.4f}"
+                    )
+
+                epoch_loss += avg_loss
+                num_updates += 1
+                accumulated_loss = 0.0
+                accumulation_step = 0
 
             epoch_time = time.time() - epoch_start_time
             avg_epoch_loss = epoch_loss / max(num_updates, 1)

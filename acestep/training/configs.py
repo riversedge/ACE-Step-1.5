@@ -116,7 +116,6 @@ class TrainingConfig:
     output_dir: str = "./lora_output"
     
     # Data loading
-    val_split: float = 0.0
     num_workers: int = 4
     pin_memory: bool = True
     prefetch_factor: int = 2
@@ -156,5 +155,4 @@ class TrainingConfig:
             "persistent_workers": self.persistent_workers,
             "pin_memory_device": self.pin_memory_device,
             "log_every_n_steps": self.log_every_n_steps,
-            "val_split": self.val_split,
         }
